@@ -1,4 +1,4 @@
 # ImageStore
 for all images
  
-- https://askybig.github.io/ImageStore/resourcePath
+- https://askybig.github.io/ImageStore/<resourcePath\>

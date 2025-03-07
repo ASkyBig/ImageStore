@@ -12,5 +12,8 @@
   "license": "ISC",
   "devDependencies": {
     "sharp": "^0.33.5"
+  },
+  "dependencies": {
+    "heic-convert": "^2.1.0"
   }
 }

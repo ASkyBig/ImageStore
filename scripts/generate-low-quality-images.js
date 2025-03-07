@@ -50,6 +50,7 @@ async function processImage(filePath, quality) {
       try {
         // 读取原始文件
         const buffer = fs.readFileSync(filePath);
+        const originalSize = buffer.length;
 
         // 根据文件类型决定处理方式
         if (fileExt === ".heic") {
@@ -57,59 +58,129 @@ async function processImage(filePath, quality) {
             console.log(`🔄 处理HEIC文件: ${filePath}`);
 
             // 使用更直接的方法处理HEIC
-            // 先转为JPEG
+            // 先转为JPEG - 对HEIC使用更低的质量
+            const heicQuality = Math.min(quality, 30); // 对HEIC特别限制最高质量为30
+
+            // 转换为JPEG
             const jpegBuffer = await heicConvert({
               buffer: buffer,
               format: "JPEG",
-              quality: 100, // 高质量转换
+              quality: heicQuality,
             });
 
-            // 压缩JPEG
+            // 进一步压缩 - 同时缩小尺寸
+            let imageInfo;
+            try {
+              imageInfo = await sharp(buffer).metadata();
+            } catch (error) {
+              console.log(`无法读取图像信息: ${error.message}`);
+              imageInfo = { width: 3000, height: 2000 }; // 默认假设值
+            }
+
+            // 计算新尺寸 - 如果原图较大，则缩小到75%
+            let resizeOptions = {};
+            if (imageInfo.width > 1000 || imageInfo.height > 1000) {
+              resizeOptions = {
+                width: Math.round(imageInfo.width * 0.75),
+                height: Math.round(imageInfo.height * 0.75),
+                fit: "inside",
+              };
+            }
+
+            // 压缩并可能缩小
             const compressedJpegBuffer = await sharp(jpegBuffer)
-              .jpeg({ quality: quality })
+              .resize(resizeOptions)
+              .jpeg({
+                quality: heicQuality,
+                mozjpeg: true, // 使用mozjpeg提供更好的压缩
+              })
               .toBuffer();
 
-            // 转回HEIC格式 (设置更高质量以确保转换成功)
-            const heicBuffer = await heicConvert({
-              buffer: compressedJpegBuffer,
-              format: "HEIC",
-              quality: Math.min(quality + 10, 100), // 稍微提高质量以确保转换
-            });
+            // 检查文件大小
+            if (compressedJpegBuffer.length < originalSize) {
+              // 只有当压缩版本确实更小时才保存JPEG
+              const jpegPath = path.join(dirPath, `${fileName}_low.jpg`);
+              fs.writeFileSync(jpegPath, compressedJpegBuffer);
+              console.log(
+                `✅ 已创建: ${jpegPath} (${originalSize} -> ${
+                  compressedJpegBuffer.length
+                } 字节，节省 ${Math.round(
+                  ((originalSize - compressedJpegBuffer.length) /
+                    originalSize) *
+                    100
+                )}%)`
+              );
+            } else {
+              console.log(`⚠️ 压缩后大小反而增加，尝试更激进的压缩`);
 
-            // 写入低质量HEIC文件
-            fs.writeFileSync(lowQualityPath, heicBuffer);
-            console.log(`✅ 已创建: ${lowQualityPath}`);
+              // 更激进的压缩: 降低质量，强制缩小尺寸
+              const aggressiveJpegBuffer = await sharp(jpegBuffer)
+                .resize({
+                  width: Math.round(imageInfo.width * 0.5), // 缩小到50%
+                  height: Math.round(imageInfo.height * 0.5),
+                  fit: "inside",
+                })
+                .jpeg({
+                  quality: Math.min(heicQuality, 20), // 更低质量
+                  mozjpeg: true,
+                })
+                .toBuffer();
+
+              if (aggressiveJpegBuffer.length < originalSize) {
+                const jpegPath = path.join(dirPath, `${fileName}_low.jpg`);
+                fs.writeFileSync(jpegPath, aggressiveJpegBuffer);
+                console.log(
+                  `✅ 已创建: ${jpegPath} (${originalSize} -> ${
+                    aggressiveJpegBuffer.length
+                  } 字节，节省 ${Math.round(
+                    ((originalSize - aggressiveJpegBuffer.length) /
+                      originalSize) *
+                      100
+                  )}%)`
+                );
+              } else {
+                console.log(`❌ 无法创建比原始HEIC更小的JPEG文件，跳过处理`);
+              }
+            }
           } catch (heicError) {
             console.error(`❌ HEIC处理失败: ${filePath}`, heicError.message);
-            // 尝试退化方案 - 转为JPEG
-            try {
-              console.log(`⚠️ 尝试将HEIC转为低质量JPEG作为备选`);
-              const jpegBuffer = await heicConvert({
-                buffer: buffer,
-                format: "JPEG",
-                quality: quality,
-              });
-              const jpegPath = path.join(dirPath, `${fileName}_low.jpg`);
-              fs.writeFileSync(jpegPath, jpegBuffer);
-              console.log(`✅ 已创建备选文件: ${jpegPath}`);
-            } catch (fallbackError) {
-              console.error(`❌ 备选处理也失败: ${fallbackError.message}`);
-            }
           }
         } else {
           // 处理常规图片格式 (JPG, PNG)
           try {
             let pipeline = sharp(buffer, { failOn: "none" });
 
+            // 获取图像信息
+            const imageInfo = await pipeline.metadata();
+
+            // 如果图像较大，适当缩小
+            if (imageInfo.width > 1200 || imageInfo.height > 1200) {
+              pipeline = pipeline.resize({
+                width: Math.round(imageInfo.width * 0.8),
+                height: Math.round(imageInfo.height * 0.8),
+                fit: "inside",
+              });
+            }
+
             // 根据文件类型决定输出格式
             if (fileExt === ".png") {
               pipeline = pipeline.png({ quality });
             } else {
-              pipeline = pipeline.jpeg({ quality });
+              pipeline = pipeline.jpeg({
+                quality: quality,
+                mozjpeg: true, // 使用mozjpeg提供更好的压缩
+              });
             }
 
             await pipeline.toFile(lowQualityPath);
-            console.log(`✅ 已创建: ${lowQualityPath}`);
+
+            // 检查处理后的文件大小
+            const compressedSize = fs.statSync(lowQualityPath).size;
+            console.log(
+              `✅ 已创建: ${lowQualityPath} (${originalSize} -> ${compressedSize} 字节，节省 ${Math.round(
+                ((originalSize - compressedSize) / originalSize) * 100
+              )}%)`
+            );
           } catch (sharpError) {
             console.error(`❌ Sharp处理失败: ${filePath}`, sharpError.message);
           }
@@ -129,7 +200,7 @@ async function processImage(filePath, quality) {
 // 递归遍历目录并处理所有图片
 async function processDirectory(
   directoryPath,
-  quality = 10,
+  quality = 40,
   recursive = true,
   currentDepth = 0
 ) {
@@ -190,7 +261,7 @@ async function processDirectory(
 function parseArgs() {
   const args = process.argv.slice(2);
   let directory = null;
-  let quality = 10;
+  let quality = 40;
   let recursive = true; // 默认启用递归处理
 
   // 解析命令行参数
@@ -230,7 +301,7 @@ async function main() {
 
     console.log(`🔧 压缩质量设置为: ${quality}`);
     console.log(`🔍 递归处理子目录: ${recursive ? "是" : "否"}`);
-    console.log(`🖼️ 支持的图片格式: JPG, JPEG, PNG, HEIC (保持原格式)`);
+    console.log(`🖼️ 支持的图片格式: JPG, JPEG, PNG, HEIC (转为JPG)`);
 
     await processDirectory(directory, quality, recursive);
     console.log("🎉 所有处理已完成");

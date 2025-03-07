@@ -1,0 +1,16 @@
+{
+  "name": "imagestore",
+  "version": "1.0.0",
+  "description": "for all images",
+  "main": "xss.js",
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1",
+    "gen": "node scripts/generate-low-quality-images.js"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "devDependencies": {
+    "sharp": "^0.33.5"
+  }
+}

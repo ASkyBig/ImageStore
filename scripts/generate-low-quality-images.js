@@ -29,170 +29,149 @@ async function processImage(filePath, quality) {
   ) {
     const dirPath = path.dirname(filePath);
 
-    // 保持原始扩展名，包括HEIC
-    const lowQualityPath = path.join(dirPath, `${fileName}_low${fileExt}`);
+    // 定义输出文件路径 - 修正命名格式
+    // 非HEIC文件不再生成低质量原格式版本
+    const highQualityWebpPath = path.join(dirPath, `${fileName}.webp`);
+    const lowQualityWebpPath = path.join(dirPath, `${fileName}_low.webp`);
 
-    // 检查是否已经存在低质量版本 (不区分大小写)
+    // 检查是否已经存在WebP版本 (不区分大小写)
     const dirFiles = fs.readdirSync(dirPath);
-    const lowQualityExists = dirFiles.some(
-      (f) => f.toLowerCase() === path.basename(lowQualityPath).toLowerCase()
+    const highQualityWebpExists = dirFiles.some(
+      (f) =>
+        f.toLowerCase() === path.basename(highQualityWebpPath).toLowerCase()
+    );
+    const lowQualityWebpExists = dirFiles.some(
+      (f) => f.toLowerCase() === path.basename(lowQualityWebpPath).toLowerCase()
     );
 
-    if (lowQualityExists) {
-      console.log(`⏭️ 已存在低质量版本: ${lowQualityPath}`);
-      return;
-    }
+    console.log(`处理: ${filePath}`);
 
-    // 如果低质量版本不存在，则创建
-    if (!fs.existsSync(lowQualityPath)) {
-      console.log(`处理: ${filePath}`);
+    try {
+      // 读取原始文件
+      const buffer = fs.readFileSync(filePath);
+      const originalSize = buffer.length;
 
-      try {
-        // 读取原始文件
-        const buffer = fs.readFileSync(filePath);
-        const originalSize = buffer.length;
+      // 根据文件类型决定处理方式
+      if (fileExt === ".heic") {
+        // HEIC处理: 创建高质量和低质量WebP
+        try {
+          console.log(`🔄 处理HEIC文件: ${filePath}`);
 
-        // 根据文件类型决定处理方式
-        if (fileExt === ".heic") {
+          // 转换HEIC为JPEG缓冲区
+          const jpegBuffer = await heicConvert({
+            buffer: buffer,
+            format: "JPEG",
+            quality: 90, // 高质量转换
+          });
+
+          // 获取图像信息
+          let imageInfo;
           try {
-            console.log(`🔄 处理HEIC文件: ${filePath}`);
+            imageInfo = await sharp(jpegBuffer).metadata();
+          } catch (error) {
+            console.log(`无法读取图像信息: ${error.message}`);
+            imageInfo = { width: 3000, height: 2000 }; // 默认假设值
+          }
 
-            // 使用更直接的方法处理HEIC
-            // 先转为JPEG - 对HEIC使用更低的质量
-            const heicQuality = Math.min(quality, 30); // 对HEIC特别限制最高质量为30
+          // 1. 创建高质量WebP (如果不存在)
+          if (!highQualityWebpExists) {
+            // 使用高质量设置创建WebP
+            await sharp(jpegBuffer)
+              .webp({
+                quality: 85,
+                lossless: false,
+              })
+              .toFile(highQualityWebpPath);
 
-            // 转换为JPEG
-            const jpegBuffer = await heicConvert({
-              buffer: buffer,
-              format: "JPEG",
-              quality: heicQuality,
-            });
+            const highQualityWebpSize = fs.statSync(highQualityWebpPath).size;
+            console.log(
+              `✅ 已创建高质量WebP: ${highQualityWebpPath} (${originalSize} -> ${highQualityWebpSize} 字节，节省 ${Math.round(
+                ((originalSize - highQualityWebpSize) / originalSize) * 100
+              )}%)`
+            );
+          } else {
+            console.log(`⏭️ 已存在高质量WebP版本: ${highQualityWebpPath}`);
+          }
 
-            // 进一步压缩 - 同时缩小尺寸
-            let imageInfo;
-            try {
-              imageInfo = await sharp(buffer).metadata();
-            } catch (error) {
-              console.log(`无法读取图像信息: ${error.message}`);
-              imageInfo = { width: 3000, height: 2000 }; // 默认假设值
-            }
-
-            // 计算新尺寸 - 如果原图较大，则缩小到75%
+          // 2. 创建低质量WebP (如果不存在)
+          if (!lowQualityWebpExists) {
+            // 计算低质量WebP的尺寸 - 如果原图较大，则缩小
             let resizeOptions = {};
             if (imageInfo.width > 1000 || imageInfo.height > 1000) {
               resizeOptions = {
-                width: Math.round(imageInfo.width * 0.75),
-                height: Math.round(imageInfo.height * 0.75),
+                width: Math.round(imageInfo.width * 0.7),
+                height: Math.round(imageInfo.height * 0.7),
                 fit: "inside",
               };
             }
 
-            // 压缩并可能缩小
-            const compressedJpegBuffer = await sharp(jpegBuffer)
+            // 创建低质量WebP
+            await sharp(jpegBuffer)
               .resize(resizeOptions)
-              .jpeg({
-                quality: heicQuality,
-                mozjpeg: true, // 使用mozjpeg提供更好的压缩
+              .webp({
+                quality: quality,
+                lossless: false,
               })
-              .toBuffer();
+              .toFile(lowQualityWebpPath);
 
-            // 检查文件大小
-            if (compressedJpegBuffer.length < originalSize) {
-              // 只有当压缩版本确实更小时才保存JPEG
-              const jpegPath = path.join(dirPath, `${fileName}_low.jpg`);
-              fs.writeFileSync(jpegPath, compressedJpegBuffer);
-              console.log(
-                `✅ 已创建: ${jpegPath} (${originalSize} -> ${
-                  compressedJpegBuffer.length
-                } 字节，节省 ${Math.round(
-                  ((originalSize - compressedJpegBuffer.length) /
-                    originalSize) *
-                    100
-                )}%)`
-              );
-            } else {
-              console.log(`⚠️ 压缩后大小反而增加，尝试更激进的压缩`);
-
-              // 更激进的压缩: 降低质量，强制缩小尺寸
-              const aggressiveJpegBuffer = await sharp(jpegBuffer)
-                .resize({
-                  width: Math.round(imageInfo.width * 0.5), // 缩小到50%
-                  height: Math.round(imageInfo.height * 0.5),
-                  fit: "inside",
-                })
-                .jpeg({
-                  quality: Math.min(heicQuality, 20), // 更低质量
-                  mozjpeg: true,
-                })
-                .toBuffer();
-
-              if (aggressiveJpegBuffer.length < originalSize) {
-                const jpegPath = path.join(dirPath, `${fileName}_low.jpg`);
-                fs.writeFileSync(jpegPath, aggressiveJpegBuffer);
-                console.log(
-                  `✅ 已创建: ${jpegPath} (${originalSize} -> ${
-                    aggressiveJpegBuffer.length
-                  } 字节，节省 ${Math.round(
-                    ((originalSize - aggressiveJpegBuffer.length) /
-                      originalSize) *
-                      100
-                  )}%)`
-                );
-              } else {
-                console.log(`❌ 无法创建比原始HEIC更小的JPEG文件，跳过处理`);
-              }
-            }
-          } catch (heicError) {
-            console.error(`❌ HEIC处理失败: ${filePath}`, heicError.message);
+            const lowQualityWebpSize = fs.statSync(lowQualityWebpPath).size;
+            console.log(
+              `✅ 已创建低质量WebP: ${lowQualityWebpPath} (${originalSize} -> ${lowQualityWebpSize} 字节，节省 ${Math.round(
+                ((originalSize - lowQualityWebpSize) / originalSize) * 100
+              )}%)`
+            );
+          } else {
+            console.log(`⏭️ 已存在低质量WebP版本: ${lowQualityWebpPath}`);
           }
-        } else {
-          // 处理常规图片格式 (JPG, PNG)
-          try {
-            let pipeline = sharp(buffer, { failOn: "none" });
+        } catch (heicError) {
+          console.error(`❌ HEIC处理失败: ${filePath}`, heicError.message);
+        }
+      } else {
+        // 处理常规图片格式 (JPG, PNG) - 只创建低质量WebP版本
+        try {
+          // 只创建低质量WebP版本 (如果不存在)
+          if (!lowQualityWebpExists) {
+            let webpPipeline = sharp(buffer, { failOn: "none" });
 
             // 获取图像信息
-            const imageInfo = await pipeline.metadata();
+            const imageInfo = await webpPipeline.metadata();
 
             // 如果图像较大，适当缩小
             if (imageInfo.width > 1200 || imageInfo.height > 1200) {
-              pipeline = pipeline.resize({
+              webpPipeline = webpPipeline.resize({
                 width: Math.round(imageInfo.width * 0.8),
                 height: Math.round(imageInfo.height * 0.8),
                 fit: "inside",
               });
             }
 
-            // 根据文件类型决定输出格式
-            if (fileExt === ".png") {
-              pipeline = pipeline.png({ quality });
-            } else {
-              pipeline = pipeline.jpeg({
+            // 创建WebP格式
+            await webpPipeline
+              .webp({
                 quality: quality,
-                mozjpeg: true, // 使用mozjpeg提供更好的压缩
-              });
-            }
-
-            await pipeline.toFile(lowQualityPath);
+                lossless: false,
+              })
+              .toFile(lowQualityWebpPath);
 
             // 检查处理后的文件大小
-            const compressedSize = fs.statSync(lowQualityPath).size;
+            const webpCompressedSize = fs.statSync(lowQualityWebpPath).size;
             console.log(
-              `✅ 已创建: ${lowQualityPath} (${originalSize} -> ${compressedSize} 字节，节省 ${Math.round(
-                ((originalSize - compressedSize) / originalSize) * 100
+              `✅ 已创建低质量WebP: ${lowQualityWebpPath} (${originalSize} -> ${webpCompressedSize} 字节，节省 ${Math.round(
+                ((originalSize - webpCompressedSize) / originalSize) * 100
               )}%)`
             );
-          } catch (sharpError) {
-            console.error(`❌ Sharp处理失败: ${filePath}`, sharpError.message);
+          } else {
+            console.log(`⏭️ 已存在低质量WebP版本: ${lowQualityWebpPath}`);
           }
+        } catch (sharpError) {
+          console.error(`❌ Sharp处理失败: ${filePath}`, sharpError.message);
         }
-
-        // 手动清理
-        if (global.gc) global.gc();
-      } catch (error) {
-        console.error(`❌ 处理失败: ${filePath}`, error.message);
       }
-    } else {
-      console.log(`⏭️ 已存在低质量版本: ${lowQualityPath}`);
+
+      // 手动清理
+      if (global.gc) global.gc();
+    } catch (error) {
+      console.error(`❌ 处理失败: ${filePath}`, error.message);
     }
   }
 }
@@ -301,7 +280,10 @@ async function main() {
 
     console.log(`🔧 压缩质量设置为: ${quality}`);
     console.log(`🔍 递归处理子目录: ${recursive ? "是" : "否"}`);
-    console.log(`🖼️ 支持的图片格式: JPG, JPEG, PNG, HEIC (转为JPG)`);
+    console.log(`🖼️ 支持的图片格式: JPG, JPEG, PNG, HEIC`);
+    console.log(
+      `🖌️ 输出格式: 非HEIC图片只生成WebP低质量版本；HEIC图片生成高质量WebP和低质量WebP`
+    );
 
     await processDirectory(directory, quality, recursive);
     console.log("🎉 所有处理已完成");
